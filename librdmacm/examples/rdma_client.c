@@ -35,6 +35,10 @@
 #include <getopt.h>
 #include <rdma/rdma_cma.h>
 #include <rdma/rdma_verbs.h>
+#include <sys/time.h>
+
+#define MIN(a,b) (a > b ? b : a)
+#define GET_USEC(tv) (tv.tv_sec * 1000000 + tv.tv_usec)
 
 static const char *server = "127.0.0.1";
 static const char *port = "7471";
@@ -42,11 +46,14 @@ static const char *port = "7471";
 static struct rdma_cm_id *id;
 static struct ibv_mr *mr, *send_mr;
 static int send_flags;
-static uint8_t send_msg[16];
-static uint8_t recv_msg[16];
+#define SMALL_SIZE 1 * 1024 * 1024 * 1024
+static uint8_t *send_msg;
+static uint8_t *recv_msg;
 
 static int run(void)
 {
+	send_msg = (uint8_t*) malloc(sizeof(uint8_t) * SMALL_SIZE);
+	recv_msg = (uint8_t*) malloc(sizeof(uint8_t) * SMALL_SIZE);
 	struct rdma_addrinfo hints, *res;
 	struct ibv_qp_init_attr attr;
 	struct ibv_wc wc;
@@ -63,12 +70,12 @@ static int run(void)
 	memset(&attr, 0, sizeof attr);
 	attr.cap.max_send_wr = attr.cap.max_recv_wr = 1;
 	attr.cap.max_send_sge = attr.cap.max_recv_sge = 1;
-	attr.cap.max_inline_data = 16;
+	attr.cap.max_inline_data = 160;
 	attr.qp_context = id;
 	attr.sq_sig_all = 1;
 	ret = rdma_create_ep(&id, res, NULL, &attr);
 	// Check to see if we got inline data allowed or not
-	if (attr.cap.max_inline_data >= 16)
+	if (attr.cap.max_inline_data >= SMALL_SIZE)
 		send_flags = IBV_SEND_INLINE;
 	else
 		printf("rdma_client: device doesn't support IBV_SEND_INLINE, "
@@ -79,14 +86,14 @@ static int run(void)
 		goto out_free_addrinfo;
 	}
 
-	mr = rdma_reg_msgs(id, recv_msg, 16);
+	mr = rdma_reg_msgs(id, recv_msg, SMALL_SIZE);
 	if (!mr) {
 		perror("rdma_reg_msgs for recv_msg");
 		ret = -1;
 		goto out_destroy_ep;
 	}
 	if ((send_flags & IBV_SEND_INLINE) == 0) {
-		send_mr = rdma_reg_msgs(id, send_msg, 16);
+		send_mr = rdma_reg_msgs(id, send_msg, SMALL_SIZE);
 		if (!send_mr) {
 			perror("rdma_reg_msgs for send_msg");
 			ret = -1;
@@ -94,7 +101,10 @@ static int run(void)
 		}
 	}
 
-	ret = rdma_post_recv(id, NULL, recv_msg, 16, mr);
+  struct timeval tv1;
+	gettimeofday(&tv1, NULL);
+
+	ret = rdma_post_recv(id, NULL, recv_msg, SMALL_SIZE, mr);
 	if (ret) {
 		perror("rdma_post_recv");
 		goto out_dereg_send;
@@ -106,7 +116,7 @@ static int run(void)
 		goto out_dereg_send;
 	}
 
-	ret = rdma_post_send(id, NULL, send_msg, 16, send_mr, send_flags);
+	/*ret = rdma_post_send(id, NULL, send_msg, SMALL_SIZE, send_mr, send_flags);
 	if (ret) {
 		perror("rdma_post_send");
 		goto out_disconnect;
@@ -116,13 +126,36 @@ static int run(void)
 	if (ret < 0) {
 		perror("rdma_get_send_comp");
 		goto out_disconnect;
-	}
+	}*/
 
 	while ((ret = rdma_get_recv_comp(id, &wc)) == 0);
 	if (ret < 0)
 		perror("rdma_get_recv_comp");
 	else
 		ret = 0;
+
+	struct timeval tv2;
+	gettimeofday(&tv2, NULL);
+
+  printf("recv_msg: ");
+  for (int i = 0; i < MIN(20, SMALL_SIZE); i++)
+    printf("%u ", recv_msg[i]);
+  printf("\n");
+
+  int isSame = 1;
+	for (int i = 0; i < SMALL_SIZE; i++)
+		if (recv_msg[i] != (uint8_t) (i % 256))
+    {
+			printf("error: mismatch at index %d, expect %u, actual %u\n", i, (uint8_t) (i % 256), recv_msg[i]);
+			isSame = 0;
+    }
+	printf("is all same: %s\n", (isSame == 1 ? "YES":"NO") );
+
+	uint64_t time_in_micro = GET_USEC(tv2) - GET_USEC(tv1);
+	printf("Throughput: %0.4f GB/s \nLatency: %lu us\n",
+				 SMALL_SIZE / (time_in_micro / 1000000.) / (1024. * 1024 * 1024),
+				 time_in_micro);
+
 
 out_disconnect:
 	rdma_disconnect(id);
@@ -136,6 +169,8 @@ out_destroy_ep:
 out_free_addrinfo:
 	rdma_freeaddrinfo(res);
 out:
+	free(recv_msg);
+	free(send_msg);
 	return ret;
 }
 

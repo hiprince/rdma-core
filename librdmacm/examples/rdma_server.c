@@ -42,11 +42,14 @@ static const char *port = "7471";
 static struct rdma_cm_id *listen_id, *id;
 static struct ibv_mr *mr, *send_mr;
 static int send_flags;
-static uint8_t send_msg[16];
-static uint8_t recv_msg[16];
+#define SMALL_SIZE 1 * 1024 * 1024 * 1024
+static uint8_t *send_msg;
+static uint8_t *recv_msg;
 
 static int run(void)
 {
+	send_msg = (uint8_t*) malloc(sizeof(uint8_t) * SMALL_SIZE);
+	recv_msg = (uint8_t*) malloc(sizeof(uint8_t) * SMALL_SIZE);
 	struct rdma_addrinfo hints, *res;
 	struct ibv_qp_init_attr init_attr;
 	struct ibv_qp_attr qp_attr;
@@ -65,7 +68,7 @@ static int run(void)
 	memset(&init_attr, 0, sizeof init_attr);
 	init_attr.cap.max_send_wr = init_attr.cap.max_recv_wr = 1;
 	init_attr.cap.max_send_sge = init_attr.cap.max_recv_sge = 1;
-	init_attr.cap.max_inline_data = 16;
+	init_attr.cap.max_inline_data = 160;
 	init_attr.sq_sig_all = 1;
 	ret = rdma_create_ep(&listen_id, res, NULL, &init_attr);
 	if (ret) {
@@ -93,20 +96,20 @@ static int run(void)
 		perror("ibv_query_qp");
 		goto out_destroy_accept_ep;
 	}
-	if (init_attr.cap.max_inline_data >= 16)
+	if (init_attr.cap.max_inline_data >= SMALL_SIZE)
 		send_flags = IBV_SEND_INLINE;
 	else
 		printf("rdma_server: device doesn't support IBV_SEND_INLINE, "
 		       "using sge sends\n");
 
-	mr = rdma_reg_msgs(id, recv_msg, 16);
+	mr = rdma_reg_msgs(id, recv_msg, SMALL_SIZE);
 	if (!mr) {
 		ret = -1;
 		perror("rdma_reg_msgs for recv_msg");
 		goto out_destroy_accept_ep;
 	}
 	if ((send_flags & IBV_SEND_INLINE) == 0) {
-		send_mr = rdma_reg_msgs(id, send_msg, 16);
+		send_mr = rdma_reg_msgs(id, send_msg, SMALL_SIZE);
 		if (!send_mr) {
 			ret = -1;
 			perror("rdma_reg_msgs for send_msg");
@@ -114,11 +117,14 @@ static int run(void)
 		}
 	}
 
-	ret = rdma_post_recv(id, NULL, recv_msg, 16, mr);
+  for (int i = 0; i < SMALL_SIZE; i++)
+    send_msg[i] = (uint8_t) (i % 256);
+
+	/*ret = rdma_post_recv(id, NULL, recv_msg, SMALL_SIZE, mr);
 	if (ret) {
 		perror("rdma_post_recv");
 		goto out_dereg_send;
-	}
+	}*/
 
 	ret = rdma_accept(id, NULL);
 	if (ret) {
@@ -126,13 +132,13 @@ static int run(void)
 		goto out_dereg_send;
 	}
 
-	while ((ret = rdma_get_recv_comp(id, &wc)) == 0);
+	/*while ((ret = rdma_get_recv_comp(id, &wc)) == 0);
 	if (ret < 0) {
 		perror("rdma_get_recv_comp");
 		goto out_disconnect;
-	}
+	}*/
 
-	ret = rdma_post_send(id, NULL, send_msg, 16, send_mr, send_flags);
+	ret = rdma_post_send(id, NULL, send_msg, SMALL_SIZE, send_mr, send_flags);
 	if (ret) {
 		perror("rdma_post_send");
 		goto out_disconnect;
@@ -157,6 +163,8 @@ out_destroy_listen_ep:
 	rdma_destroy_ep(listen_id);
 out_free_addrinfo:
 	rdma_freeaddrinfo(res);
+  free(recv_msg);
+	free(send_msg);
 	return ret;
 }
 
